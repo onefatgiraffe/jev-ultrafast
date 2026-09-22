@@ -104,8 +104,7 @@ def choose(state, goal, history):
             },
             "instructions": {"goal": goal, "operation": operation, "rules": [NEXT_ACTION, TARGET]},
         }
-    body = {
-        "model": os.environ.get("TYPESAFE_MODEL", "jev-latest"),
+    typesafe_input = {
         "state": {
             "page": {k: state[k] for k in ("url", "title", "text")},
             "elements": elements,
@@ -115,8 +114,18 @@ def choose(state, goal, history):
         },
         "questions": questions,
     }
+    model_id = os.environ.get("TYPESAFE_MODEL", "jev-latest")
+    url = os.environ.get("TYPESAFE_BASE_URL", "https://api.typesafe.ai/v1/systemone")
+    cloudflare = "api.cloudflare.com" in url
+    body = {"model": model_id, "input": typesafe_input} if cloudflare else {"model": model_id, **typesafe_input}
     started = time.perf_counter()
-    result = post_json("https://api.typesafe.ai/v1/systemone", os.environ["TYPESAFE_API_KEY"], body)
+    raw = post_json(url, os.environ["TYPESAFE_API_KEY"], body)
+    if cloudflare:
+        if not raw.get("success"):
+            raise RuntimeError(f"Model provider errors: {raw.get('errors')}; no action executed.")
+        result = raw["result"]["result"]
+    else:
+        result = raw
     operation_answer = validate_choice(result["answers"].get("operation", {}), operations)
     operation = operation_answer["choice"]
     target = None
