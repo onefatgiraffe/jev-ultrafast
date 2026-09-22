@@ -303,7 +303,7 @@ def test_flight_verification_rejects_wrong_trip(changed):
 
 
 @pytest.mark.parametrize(
-    "content", ["Thinking: Zurich", '{"text":null}', '{"text":"Zurich","extra":true}', '{"text":123}']
+    "content", ["Thinking: Zurich", '{"text":""}', '{"text":"Zurich","extra":true}', '{"text":123}']
 )
 def test_text_helper_rejects_invalid_values(monkeypatch, content):
     monkeypatch.setenv("TEXT_MODEL_API_KEY", "test")
@@ -318,3 +318,65 @@ def test_navigation_during_prediction_reobserves_without_action(runner):
     assert runner.state["status"] == "ready"
     assert runner.state["decision"] is None
     runner.state["browser"].act.assert_not_called()
+
+
+def test_null_text_value_is_returned_for_the_caller_to_answer(monkeypatch):
+    monkeypatch.setenv("TEXT_MODEL_API_KEY", "test")
+    response = {"choices": [{"message": {"content": '{"text":null}'}}]}
+    monkeypatch.setattr(model, "post_json", Mock(return_value=response))
+    value, helper = model.field_text({"goal": "Apply for the role"})
+    assert value is None and helper["model"]
+
+
+def test_uncovered_field_pauses_without_typing(runner, monkeypatch):
+    monkeypatch.setattr(loop, "field_text", Mock(return_value=(None, {"model": "test", "latency_ms": 10})))
+    snapshot = runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    assert snapshot["status"] == "awaiting_answer"
+    assert snapshot["question"]["field"]["label"] == "Search"
+    runner.state["browser"].act.assert_not_called()
+    assert runner.state["history"] == []
+    assert runner.state["text_calls"][0]["value"] is None
+
+
+def test_caller_answer_is_typed_and_is_not_counted_as_a_model_call(runner, monkeypatch):
+    monkeypatch.setattr(loop, "field_text", Mock(return_value=(None, {"model": "test", "latency_ms": 10})))
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    runner.command("answer", {"text": "A Wizard of Earthsea"})
+    assert runner.state["browser"].act.call_args.kwargs["text"] == "A Wizard of Earthsea"
+    assert runner.state["history"][-1]["text_helper"] == "caller"
+    assert runner.state["text_calls"][-1] == {
+        "model": "caller",
+        "latency_ms": 0,
+        "usage": {},
+        "field": "Search",
+        "value": "A Wizard of Earthsea",
+    }
+
+
+def test_page_change_while_answering_discards_the_caller_value(runner, monkeypatch):
+    helper = Mock(return_value=(None, {"model": "test", "latency_ms": 10}))
+    monkeypatch.setattr(loop, "field_text", helper)
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    runner.state["page"]["text"] = "Different page context"
+    snapshot = runner.command("answer", {"text": "A Wizard of Earthsea"})
+    runner.state["browser"].act.assert_not_called()
+    assert helper.call_count == 2
+    assert snapshot["status"] == "awaiting_answer"
+
+
+@pytest.mark.parametrize("text", ["", "   ", None, 5, "x" * 2001])
+def test_invalid_caller_answer_is_rejected(runner, monkeypatch, text):
+    monkeypatch.setattr(loop, "field_text", Mock(return_value=(None, {"model": "test", "latency_ms": 10})))
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    with pytest.raises(ValueError):
+        runner.command("answer", {"text": text})
+    runner.state["browser"].act.assert_not_called()
+    assert runner.state["status"] == "awaiting_answer"
+
+
+def test_prediction_cannot_skip_a_pending_question(runner, monkeypatch):
+    monkeypatch.setattr(loop, "field_text", Mock(return_value=(None, {"model": "test", "latency_ms": 10})))
+    runner.command("act", {"fingerprint": runner.state["page"]["fingerprint"]})
+    with pytest.raises(ValueError, match="awaiting an answer"):
+        runner.command("predict", {})
+    assert runner.state["question"]["field"]["label"] == "Search"

@@ -91,6 +91,12 @@ uv run --env-file .env python examples/run.py \
 
 `uv run --env-file .env python examples/flights.py --keep-open` performs the flight search, checks the actual route/date/results, and saves its trace. It does not select or book a flight.
 
+## Call it from n8n
+
+`uv run --env-file .env jev-service` exposes one run at a time over HTTP, so an n8n AI Agent node can use the browser as
+a tool. Fields the goal does not cover pause the run and return the question to the caller instead of being guessed.
+See [docs/n8n.md](docs/n8n.md) for the wiring, and note that the service acts as your signed-in Chrome profile.
+
 ## Why it moves
 
 - **One request per decision cycle.** Operation and target heads share the same observed state.

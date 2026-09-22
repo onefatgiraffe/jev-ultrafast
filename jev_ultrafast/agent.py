@@ -16,6 +16,7 @@ class Agent:
             raise ValueError("Supply a task")
         plan = [task]
         self.pending_text = None
+        self.pending_decision = None
         self.browser = Browser(url)
         self.record_dir = Path(record_dir) if record_dir else None
         self.screenshots = screenshots or bool(record_dir)
@@ -31,6 +32,7 @@ class Agent:
             decision=None,
             history=[],
             status="ready",
+            question=None,
             plan=plan,
             plan_index=0,
             decisions=[],
@@ -65,6 +67,8 @@ class Agent:
         elif name == "predict":
             if not state["browser"]:
                 raise ValueError("Start a demo first")
+            if state["status"] == "awaiting_answer":
+                raise ValueError("A field is awaiting an answer")
             if state["started_at"] is None:
                 state["started_at"] = time.perf_counter()
             if not state["browser"].fresh(state["page"]):
@@ -113,6 +117,12 @@ class Agent:
                     text, helper = field_text(context)
                     self.pending_text = (context, text, helper)
                     state["text_calls"].append({**helper, "field": action["label"], "value": text})
+                if text is None:
+                    # The goal does not cover this field. Pause for the caller; nothing is typed or guessed.
+                    state["question"] = context
+                    state["status"] = "awaiting_answer"
+                    self.pending_decision = decision
+                    return self.snapshot()
             # Browser.act checks freshness immediately before input, including after text generation.
             state["browser"].act(action, page, text=text)
             self.pending_text = None
@@ -156,12 +166,36 @@ class Agent:
                 if len(repeated) == 3 and all(h["page_changed"] is False and h["kind"] != "wait" for h in repeated)
                 else "ready"
             )
+        elif name == "answer":
+            context = state.get("question")
+            if state["status"] != "awaiting_answer" or not context:
+                raise ValueError("No field is awaiting an answer")
+            text = body.get("text")
+            if not isinstance(text, str) or not text.strip() or len(text) > 2000:
+                raise ValueError("Enter 1-2,000 characters")
+            # A caller-supplied value is not a text-model call and must not be counted as one.
+            helper = {"model": "caller", "latency_ms": 0, "usage": {}}
+            self.pending_text = (context, text, helper)
+            state["text_calls"].append({**helper, "field": context["field"]["label"], "value": text})
+            state["question"] = None
+            state["decision"] = self.pending_decision
+            state["status"] = "predicted"
+            self.pending_decision = None
+            try:
+                return self.command("act", {"fingerprint": state["page"]["fingerprint"]})
+            except StalePage:
+                # The page moved while the caller was answering. Nothing was typed; observe and choose again.
+                state["decision"] = None
+                state["status"] = "ready"
+                state["page"] = state["browser"].observe(screenshot=self.screenshots)
+                state["elapsed_ms"] = round((time.perf_counter() - state["started_at"]) * 1000)
+                return self.snapshot()
         else:
             raise ValueError("Unknown command")
         return self.snapshot()
 
     def run(self):
-        while self.state["status"] not in {"done", "blocked"}:
+        while self.state["status"] not in {"done", "blocked", "awaiting_answer"}:
             yield self.command("tick")
 
     def close(self):
